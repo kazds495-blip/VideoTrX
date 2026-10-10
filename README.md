@@ -243,7 +243,7 @@ download:
 
 ## 致谢
 
-本项目基于 [VideoLingo](https://github.com/Huanshere/VideoLingo)（Apache-2.0），经 VideoSubX 演化而来，已大幅修改。
+感谢 [VideoLingo](https://github.com/Huanshere/VideoLingo) 带来的启发。本项目最初在 VideoLingo（Apache-2.0）的基础上修改而来，现已基本重写：修正了原有流程中一些不太合适的处理，并换用了更现代的技术方案。
 
 ## 许可证
 
