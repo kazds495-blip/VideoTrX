@@ -4,18 +4,9 @@ import os
 import re
 import time
 
-import requests
-from openai import OpenAI
 from rich.console import Console
 
-from videotrx import config, paths
-from videotrx.llm import (
-    _normalize_claude_messages_url,
-    _normalize_openai_base_url,
-    _pick_setting,
-    _resolve_protocol,
-    _save_cache,
-)
+from videotrx import llm, paths
 from videotrx.prompts import get_prompt_single_pass_full_polish
 from videotrx.utils import append_jsonl
 
@@ -28,30 +19,6 @@ POLISH_TAIL_PLACEHOLDER = "拜拜"
 POLISH_STREAM_SNAPSHOT_INTERVAL_SEC = 0.5
 POLISH_SAFE_RESERVE_LINES = 10
 POLISH_TAIL_RESERVE_LINES = 1
-
-def _load_sub_module_api_settings(prefix: str):
-    """读取子模块 api.* 覆盖项；空值由上游继承全局配置。"""
-    defaults = {
-        "key": "",
-        "base_url": "",
-        "model": "",
-        "protocol": "",
-        "llm_support_json": True,
-        "request_timeout_sec": 120,
-        "request_retries": 2,
-        "request_retry_delay_sec": 1,
-        "reasoning_effort": "",
-    }
-    resolved = {}
-    for k, v in defaults.items():
-        key = f"{prefix}.api.{k}"
-        resolved[k] = config.get_bool(key, v) if k == "llm_support_json" else config.get(key, v)
-    return resolved
-
-
-def _load_single_pass_full_polish_api_settings():
-    return _load_sub_module_api_settings("polish")
-
 
 def _sanitize_single_line_text(value):
     return str(value).replace("\n", " ").replace("\r", " ").strip()
@@ -358,232 +325,6 @@ def _restore_single_pass_full_polish_progress(src_lines, draft_lines, summary_pr
         "completion_reason": None,
     }
 
-def _resolve_single_pass_full_polish_request_settings(api_settings):
-    global_api_key = config.get("api.key", "")
-    global_model = config.get("api.model", "")
-    global_base_url = config.get("api.base_url", "")
-    global_protocol = config.get("api.protocol", "")
-    global_timeout = config.get("api.request_timeout_sec", 300)
-    global_retries = config.get("api.request_retries", 5)
-    global_retry_delay = config.get("api.request_retry_delay_sec", 1)
-
-    api_key = _pick_setting(api_settings, "key", global_api_key)
-    if not api_key:
-        raise ValueError("API key is not set")
-
-    model = _pick_setting(api_settings, "model", global_model)
-    if not model:
-        raise ValueError("Model is not set")
-
-    base_url = _pick_setting(api_settings, "base_url", global_base_url)
-    timeout = config.to_int(
-        _pick_setting(api_settings, "request_timeout_sec", global_timeout),
-        300,
-        min_value=1,
-    )
-    retries = config.to_int(
-        _pick_setting(api_settings, "request_retries", global_retries),
-        5,
-        min_value=0,
-    )
-    retry_delay = config.to_float(
-        _pick_setting(api_settings, "request_retry_delay_sec", global_retry_delay),
-        1,
-        min_value=0,
-    )
-    route = _resolve_protocol(api_settings, global_protocol)
-    # 思考等级与模型绑定，不继承全局 api.reasoning_effort
-    reasoning_effort = str((api_settings or {}).get("reasoning_effort", "") or "").strip()
-
-    return {
-        "api_key": api_key,
-        "model": model,
-        "base_url": base_url,
-        "timeout": timeout,
-        "retries": retries,
-        "retry_delay": retry_delay,
-        "route": route,
-        "reasoning_effort": reasoning_effort,
-    }
-
-def _stream_openai_text(prompt, request_settings, on_delta):
-    client_kwargs = {"api_key": request_settings["api_key"]}
-    if request_settings["base_url"]:
-        client_kwargs["base_url"] = _normalize_openai_base_url(request_settings["base_url"])
-
-    client = OpenAI(**client_kwargs)
-    params = dict(
-        model=request_settings["model"],
-        messages=[{"role": "user", "content": prompt}],
-        timeout=request_settings["timeout"],
-        stream=True,
-    )
-    if request_settings.get("reasoning_effort"):
-        params["reasoning_effort"] = request_settings["reasoning_effort"]
-    stream = client.chat.completions.create(**params)
-
-    finish_reason = None
-    try:
-        for chunk in stream:
-            choices = getattr(chunk, "choices", None) or []
-            if not choices:
-                continue
-
-            choice = choices[0]
-            delta = getattr(choice, "delta", None)
-            content = getattr(delta, "content", None) if delta else None
-            if isinstance(content, list):
-                content = "".join(
-                    part.get("text", "") if isinstance(part, dict) else str(part)
-                    for part in content
-                )
-            if content:
-                on_delta(content)
-
-            chunk_finish_reason = getattr(choice, "finish_reason", None)
-            if chunk_finish_reason:
-                finish_reason = chunk_finish_reason
-    finally:
-        close_stream = getattr(stream, "close", None)
-        if callable(close_stream):
-            close_stream()
-
-    return finish_reason or "stop"
-
-def _describe_responses_error(error_info):
-    if error_info is None:
-        return "unknown error"
-    code = getattr(error_info, "code", None)
-    message = getattr(error_info, "message", None)
-    if code and message:
-        return f"{code}: {message}"
-    return str(message or code or "unknown error")
-
-def _stream_openai_responses_text(prompt, request_settings, on_delta):
-    client_kwargs = {"api_key": request_settings["api_key"]}
-    if request_settings["base_url"]:
-        client_kwargs["base_url"] = request_settings["base_url"]
-
-    client = OpenAI(**client_kwargs)
-    params = dict(
-        model=request_settings["model"],
-        input=prompt,
-        timeout=request_settings["timeout"],
-        stream=True,
-    )
-    if request_settings.get("reasoning_effort"):
-        params["reasoning"] = {"effort": request_settings["reasoning_effort"]}
-    stream = client.responses.create(**params)
-
-    completed = False
-    try:
-        for event in stream:
-            event_type = getattr(event, "type", None)
-            if event_type == "response.output_text.delta":
-                delta_text = getattr(event, "delta", None)
-                if delta_text:
-                    on_delta(delta_text)
-            elif event_type == "response.completed":
-                completed = True
-                break
-            elif event_type == "response.failed":
-                failed_response = getattr(event, "response", None)
-                raise ValueError(
-                    "OpenAI Responses stream failed: "
-                    f"{_describe_responses_error(getattr(failed_response, 'error', None))}"
-                )
-            elif event_type == "response.incomplete":
-                incomplete_response = getattr(event, "response", None)
-                details = getattr(incomplete_response, "incomplete_details", None)
-                reason = getattr(details, "reason", None)
-                raise ValueError(
-                    f"OpenAI Responses stream incomplete: {reason or 'unknown reason'}"
-                )
-            elif event_type == "error":
-                raise ValueError(
-                    f"OpenAI Responses stream error: {_describe_responses_error(event)}"
-                )
-    finally:
-        close_stream = getattr(stream, "close", None)
-        if callable(close_stream):
-            close_stream()
-
-    if not completed:
-        raise ValueError("OpenAI Responses stream ended without response.completed")
-
-    return "stop"
-
-def _stream_claude_text(prompt, request_settings, on_delta):
-    if not request_settings["base_url"]:
-        raise ValueError("Claude base_url is not set")
-
-    url = _normalize_claude_messages_url(request_settings["base_url"])
-    headers = {
-        "x-api-key": request_settings["api_key"],
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": request_settings["model"],
-        "max_tokens": 8192,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": True,
-    }
-    if request_settings.get("reasoning_effort"):
-        payload["output_config"] = {"effort": request_settings["reasoning_effort"]}
-
-    finish_reason = None
-    with requests.post(
-        url,
-        headers=headers,
-        json=payload,
-        timeout=request_settings["timeout"],
-        stream=True,
-    ) as response:
-        response.raise_for_status()
-        event_type = None
-        data_lines = []
-
-        for raw_line in response.iter_lines(decode_unicode=True):
-            if raw_line is None:
-                continue
-
-            line = raw_line.strip()
-            if not line:
-                if data_lines:
-                    payload_text = "\n".join(data_lines)
-                    payload_data = json.loads(payload_text)
-
-                    if event_type == "content_block_delta":
-                        delta = payload_data.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text = delta.get("text", "")
-                            if text:
-                                on_delta(text)
-                    elif event_type == "message_delta":
-                        finish_reason = (
-                            payload_data.get("delta", {}).get("stop_reason") or finish_reason
-                        )
-                    elif event_type == "error":
-                        error_info = payload_data.get("error", payload_data)
-                        raise ValueError(f"Claude streaming error: {error_info}")
-                    elif event_type == "message_stop":
-                        finish_reason = finish_reason or "stop"
-                        break
-
-                event_type = None
-                data_lines = []
-                continue
-
-            if line.startswith(":"):
-                continue
-            if line.startswith("event:"):
-                event_type = line[len("event:") :].strip()
-            elif line.startswith("data:"):
-                data_lines.append(line[len("data:") :].strip())
-
-    return finish_reason or "stop"
-
 def _parse_polish_stream_lines(raw_content, start_line, end_line, allow_last_without_newline=False):
     if not raw_content:
         return []
@@ -794,11 +535,10 @@ def _log_single_pass_full_polish_round(
     if error:
         message += f" error={error}"
 
-    _save_cache(
+    llm.save_log(
         request_settings["model"],
         prompt,
         raw_content,
-        "text",
         raw_content,
         message=message,
         log_title="single_pass_full_polish",
@@ -883,12 +623,7 @@ def _run_single_pass_full_polish_round(
         persist_stream_snapshot(force=True)
 
     try:
-        if request_settings["route"] == "messages":
-            finish_reason = _stream_claude_text(prompt, request_settings, on_delta)
-        elif request_settings["route"] == "responses":
-            finish_reason = _stream_openai_responses_text(prompt, request_settings, on_delta)
-        else:
-            finish_reason = _stream_openai_text(prompt, request_settings, on_delta)
+        finish_reason = llm.stream_text(prompt, request_settings, on_delta)
     except Exception as exc:
         error = exc
     finally:
@@ -974,8 +709,11 @@ def polish_single_pass_full_text(src_lines, draft_lines, summary_prompt=None):
         raise ValueError("Full polish input mismatch: source and translation line counts are different.")
 
     line_count = len(draft_lines)
-    api_settings = _load_single_pass_full_polish_api_settings()
-    request_settings = _resolve_single_pass_full_polish_request_settings(api_settings)
+    request_settings = llm.resolve_settings("polish")
+    if not request_settings["api_key"]:
+        raise ValueError("API key is not set")
+    if not request_settings["model"]:
+        raise ValueError("Model is not set")
     resume_state = _restore_single_pass_full_polish_progress(
         src_lines=src_lines,
         draft_lines=draft_lines,

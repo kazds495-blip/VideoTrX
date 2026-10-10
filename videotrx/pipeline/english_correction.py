@@ -7,7 +7,7 @@ from rich import print as rprint
 
 from videotrx import config, paths
 from videotrx.language import source_language
-from videotrx.llm import ask_gpt
+from videotrx.llm import ask_json
 from videotrx.prompts import get_english_correction_prompt
 from videotrx.utils import append_jsonl, read_json, write_json
 
@@ -69,21 +69,6 @@ def _build_tokens(df: pd.DataFrame) -> List[Dict]:
             }
         )
     return tokens
-
-
-def _get_correction_api_settings() -> Dict:
-    # Empty value means fallback to global api.* settings.
-    return {
-        "key": config.get("english_correction.api.key", ""),
-        "base_url": config.get("english_correction.api.base_url", ""),
-        "model": config.get("english_correction.api.model", ""),
-        "protocol": config.get("english_correction.api.protocol", ""),
-        "llm_support_json": config.get_bool("english_correction.api.llm_support_json", True),
-        "request_timeout_sec": config.get("english_correction.api.request_timeout_sec", None),
-        "request_retries": config.get("english_correction.api.request_retries", None),
-        "request_retry_delay_sec": config.get("english_correction.api.request_retry_delay_sec", None),
-        "reasoning_effort": config.get("english_correction.api.reasoning_effort", ""),
-    }
 
 
 CORRECTION_ITEM_FIELDS = ("start_key", "source", "target", "type", "confidence", "reason")
@@ -258,13 +243,12 @@ def correct_english_asr_tokens():
     rprint(f"[cyan]Running English ASR correction on {len(tokens)} tokens...[/cyan]")
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    response = ask_gpt(
+    response = ask_json(
         prompt,
-        resp_type="json",
+        CORRECTION_RESPONSE_SCHEMA,
         valid_def=_valid_correction_response,
         log_title="english_correction",
-        api_settings=_get_correction_api_settings(),
-        json_schema=CORRECTION_RESPONSE_SCHEMA,
+        section="english_correction",
     )
     corrections = response.get("corrections", [])
     if not corrections:

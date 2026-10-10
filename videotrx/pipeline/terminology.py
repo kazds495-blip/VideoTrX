@@ -3,7 +3,7 @@ from videotrx import paths
 from videotrx.prompts import get_summary_prompt
 from rich import print as rprint
 from videotrx import config
-from videotrx.llm import ask_gpt
+from videotrx.llm import ask_json
 from videotrx.utils import read_json
 
 def combine_chunks():
@@ -78,12 +78,11 @@ def get_summary():
         "required": ["theme", "terms"],
         "additionalProperties": False,
     }
-    summary = ask_gpt(
+    summary = ask_json(
         summary_prompt,
-        resp_type='json',
+        summary_schema,
         valid_def=valid_summary,
         log_title='summary',
-        json_schema=summary_schema,
     )
     summary['terms'].extend(custom_terms_json['terms'])
     

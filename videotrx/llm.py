@@ -25,7 +25,7 @@ def _pick_setting(override: dict, key: str, default=None):
     return default
 
 
-def _save_cache(model, prompt, resp_content, resp_type, resp, message=None, log_title="default"):
+def save_log(model, prompt, resp_content, resp, message=None, log_title="default", attempt=0):
     with LOCK:
         logs = []
         file = os.path.join(paths.GPT_LOG_DIR, f"{log_title}.json")
@@ -37,8 +37,8 @@ def _save_cache(model, prompt, resp_content, resp_type, resp, message=None, log_
             {
                 "model": model,
                 "prompt": prompt,
+                "attempt": attempt,
                 "resp_content": resp_content,
-                "resp_type": resp_type,
                 "resp": resp,
                 "message": message,
             }
@@ -47,15 +47,18 @@ def _save_cache(model, prompt, resp_content, resp_type, resp, message=None, log_
             json.dump(logs, f, ensure_ascii=False, indent=4)
 
 
-def _load_cache(prompt, resp_type, log_title, model=None):
+def _load_cache(prompt, log_title, model, attempt):
     with LOCK:
         file = os.path.join(paths.GPT_LOG_DIR, f"{log_title}.json")
         if os.path.exists(file):
             with open(file, "r", encoding="utf-8") as f:
                 for item in json.load(f):
-                    if item["prompt"] == prompt and item["resp_type"] == resp_type:
-                        if model is not None and item.get("model") != model:
-                            continue
+                    # 没有 attempt 字段的旧记录视为第 0 次
+                    if (
+                        item["prompt"] == prompt
+                        and item.get("model") == model
+                        and item.get("attempt", 0) == attempt
+                    ):
                         return item["resp"]
         return False
 
@@ -78,6 +81,39 @@ def _resolve_protocol(api_settings, global_protocol):
     return protocol
 
 
+def resolve_settings(section=None) -> dict:
+    """api.* 为全局值；section 非空时读 <section>.api.*，非空的项覆盖全局，留空或缺省的继承全局。
+
+    reasoning_effort 与模型绑定，不继承：section 为空时读 api.reasoning_effort，
+    否则只读 <section>.api.reasoning_effort。
+    """
+    overrides = config.get(f"{section}.api", {}) if section else {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+
+    def pick(key, default):
+        return _pick_setting(overrides, key, config.get(f"api.{key}", default))
+
+    llm_support_json = config.get_bool("api.llm_support_json", True)
+    if section:
+        llm_support_json = config.get_bool(f"{section}.api.llm_support_json", llm_support_json)
+        reasoning_effort = overrides.get("reasoning_effort", "")
+    else:
+        reasoning_effort = config.get("api.reasoning_effort", "")
+
+    return {
+        "api_key": pick("key", ""),
+        "model": pick("model", ""),
+        "base_url": pick("base_url", ""),
+        "protocol": _resolve_protocol(overrides, config.get("api.protocol", "")),
+        "llm_support_json": llm_support_json,
+        "timeout": config.to_int(pick("request_timeout_sec", 300), 300, min_value=1),
+        "retries": config.to_int(pick("request_retries", 5), 5, min_value=0),
+        "retry_delay": config.to_float(pick("request_retry_delay_sec", 1), 1, min_value=0),
+        "reasoning_effort": str(reasoning_effort or "").strip(),
+    }
+
+
 def _normalize_openai_base_url(base_url: str) -> str:
     return base_url.strip().rstrip("/")
 
@@ -98,302 +134,356 @@ def _safe_json(obj):
         return str(obj)
 
 
-def _ask_gpt_chat(
-    prompt,
-    resp_type,
-    model,
-    base_url,
-    api_key,
-    llm_support_json,
-    timeout,
-    json_schema=None,
-    reasoning_effort="",
-):
-    base_url = _normalize_openai_base_url(base_url)
-    client = OpenAI(api_key=api_key, base_url=base_url)
-    response_format = None
-    if resp_type == "json" and llm_support_json:
-        if json_schema is not None:
-            # 实测（2026-10-09）：中转站对 gemini-3.1-pro-preview 接受该字段但不强制 schema，
-            # 回复仍可能带代码块或不符合结构，因此保留 json_repair 解析，并依赖 valid_def 校验
-            response_format = {
-                "type": "json_schema",
-                "json_schema": {"name": "output", "schema": json_schema, "strict": True},
-            }
-        else:
-            response_format = {"type": "json_object"}
-
+def _ask_gpt_chat(prompt, schema, settings):
+    base_url = _normalize_openai_base_url(settings["base_url"])
+    client = OpenAI(api_key=settings["api_key"], base_url=base_url)
     params = dict(
-        model=model,
+        model=settings["model"],
         messages=[{"role": "user", "content": prompt}],
-        response_format=response_format,
-        timeout=timeout,
+        timeout=settings["timeout"],
     )
+    if settings["llm_support_json"]:
+        # 实测（2026-10-09）：中转站对 gemini-3.1-pro-preview 接受该字段但不强制 schema，
+        # 回复仍可能带代码块或不符合结构，因此保留 json_repair 解析，并依赖 valid_def 校验
+        params["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "output", "schema": schema, "strict": True},
+        }
     # 取值原样透传，SDK 不在运行时校验
-    if reasoning_effort:
-        params["reasoning_effort"] = reasoning_effort
+    if settings["reasoning_effort"]:
+        params["reasoning_effort"] = settings["reasoning_effort"]
     resp_raw = client.chat.completions.create(**params)
     resp_content = resp_raw.choices[0].message.content
-    if resp_type == "json":
-        resp = json_repair.loads(resp_content)
-    else:
-        resp = resp_content
-    return resp_content, resp
+    return resp_content, json_repair.loads(resp_content)
 
 
-def _ask_openai_responses(
-    prompt,
-    resp_type,
-    model,
-    base_url,
-    api_key,
-    llm_support_json,
-    timeout,
-    json_schema=None,
-    reasoning_effort="",
-):
-    client = OpenAI(api_key=api_key, base_url=base_url)
+def _ask_openai_responses(prompt, schema, settings):
+    client = OpenAI(api_key=settings["api_key"], base_url=settings["base_url"])
 
-    params = dict(model=model, input=prompt, timeout=timeout)
-    if resp_type == "json" and llm_support_json:
-        if json_schema is not None:
-            params["text"] = {
-                "format": {"type": "json_schema", "name": "output", "schema": json_schema, "strict": True}
-            }
-        else:
-            params["text"] = {"format": {"type": "json_object"}}
-    if reasoning_effort:
-        params["reasoning"] = {"effort": reasoning_effort}
+    params = dict(model=settings["model"], input=prompt, timeout=settings["timeout"])
+    if settings["llm_support_json"]:
+        params["text"] = {
+            "format": {"type": "json_schema", "name": "output", "schema": schema, "strict": True}
+        }
+    if settings["reasoning_effort"]:
+        params["reasoning"] = {"effort": settings["reasoning_effort"]}
 
     resp_raw = client.responses.create(**params)
     resp_content = resp_raw.output_text
     if not resp_content:
         raise ValueError("OpenAI Responses returned empty output_text")
-    if resp_type == "json":
-        resp = json_repair.loads(resp_content)
-    else:
-        resp = resp_content
-    return resp_content, resp
+    return resp_content, json_repair.loads(resp_content)
 
 
-def _ask_claude_messages(
-    prompt,
-    resp_type,
-    model,
-    base_url,
-    api_key,
-    llm_support_json,
-    timeout,
-    json_schema=None,
-    reasoning_effort="",
-):
-    url = _normalize_claude_messages_url(base_url)
+def _ask_claude_messages(prompt, schema, settings):
+    url = _normalize_claude_messages_url(settings["base_url"])
     headers = {
-        "x-api-key": api_key,
+        "x-api-key": settings["api_key"],
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
     payload = {
-        "model": model,
+        "model": settings["model"],
         # 开启思考后，思考消耗的 token 也计入 max_tokens
         "max_tokens": 8192,
         "messages": [{"role": "user", "content": prompt}],
     }
     output_config = {}
-    structured_output = resp_type == "json" and llm_support_json and json_schema is not None
+    structured_output = settings["llm_support_json"]
     if structured_output:
         # 原生结构化输出：回复为按 schema 约束的 text 块，且不影响模型思考
-        output_config["format"] = {"type": "json_schema", "schema": json_schema}
-    elif resp_type == "json" and llm_support_json:
-        # 兜底：未提供 schema 的调用仍用强制工具调用取 JSON。
-        # 注意 Opus 5.5 / Sonnet 5.5 / Fable 5.1 对强制 tool_choice 直接返回 400，
-        # Haiku 5.5 在强制工具调用时不思考；所有调用补齐 schema 后应删除此路径。
-        payload["tools"] = [
-            {
-                "name": "output_json",
-                "description": "Return final answer as a JSON object only.",
-                "input_schema": {"type": "object", "additionalProperties": True},
-            }
-        ]
-        payload["tool_choice"] = {"type": "tool", "name": "output_json"}
-    if reasoning_effort:
-        output_config["effort"] = reasoning_effort
+        output_config["format"] = {"type": "json_schema", "schema": schema}
+    if settings["reasoning_effort"]:
+        output_config["effort"] = settings["reasoning_effort"]
     if output_config:
         payload["output_config"] = output_config
 
-    resp_raw = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    resp_raw = requests.post(url, headers=headers, json=payload, timeout=settings["timeout"])
     resp_raw.raise_for_status()
     data = resp_raw.json()
     blocks = data.get("content", []) if isinstance(data, dict) else []
+    text_content = "\n".join(
+        block.get("text", "") for block in blocks if block.get("type") == "text"
+    ).strip()
 
     if structured_output:
         # refusal / max_tokens 时输出可能不完整、不符合 schema，抛异常交给重试
         stop_reason = data.get("stop_reason") if isinstance(data, dict) else None
         if stop_reason in ("refusal", "max_tokens"):
             raise ValueError(f"Claude structured output stopped early: stop_reason={stop_reason}")
-        text_content = "\n".join(
-            block.get("text", "") for block in blocks if block.get("type") == "text"
-        ).strip()
         return text_content, json.loads(text_content)
 
-    if resp_type == "json":
-        for block in blocks:
-            if block.get("type") == "tool_use" and "input" in block:
-                tool_input = block["input"]
-                if isinstance(tool_input, dict):
-                    return _safe_json(tool_input), tool_input
-                return str(tool_input), json_repair.loads(str(tool_input))
-
-        text_content = "\n".join(
-            block.get("text", "") for block in blocks if block.get("type") == "text"
-        ).strip()
-        if not text_content:
-            text_content = _safe_json(data)
-        return text_content, json_repair.loads(text_content)
-
-    text_content = "\n".join(
-        block.get("text", "") for block in blocks if block.get("type") == "text"
-    ).strip()
-    if not text_content:
-        for block in blocks:
-            if block.get("type") == "tool_use" and "input" in block:
-                tool_input = block["input"]
-                text_content = (
-                    _safe_json(tool_input) if isinstance(tool_input, (dict, list)) else str(tool_input)
-                )
-                break
     if not text_content:
         text_content = _safe_json(data)
-    return text_content, text_content
+    return text_content, json_repair.loads(text_content)
 
 
 # ------------
-# ask gpt with retry
+# ask json with retry
 # ------------
 
-def ask_gpt(prompt, resp_type=None, valid_def=None, log_title="default", api_settings=None, json_schema=None):
-    global_api_key = config.get("api.key", "")
-    global_model = config.get("api.model", "")
-    global_base_url = config.get("api.base_url", "")
-    global_protocol = config.get("api.protocol", "")
-    global_llm_support_json = config.get_bool("api.llm_support_json", True)
-    global_timeout = config.get("api.request_timeout_sec", 300)
-    global_retries = config.get("api.request_retries", 5)
-    global_retry_delay = config.get("api.request_retry_delay_sec", 1)
-
-    api_key = _pick_setting(api_settings, "key", global_api_key)
-    if not api_key:
-        raise ValueError("API key is not set")
-    model = _pick_setting(api_settings, "model", global_model)
-
+def ask_json(prompt, schema, *, valid_def=None, log_title="default", section=None, attempt=0) -> dict:
+    """按 schema 请求 JSON 回复；attempt 区分同一 prompt 的第几次重试，只参与缓存匹配，不改动 prompt。"""
     # 协议在缓存查找之前解析：配置非法时直接报错，不静默回放缓存
-    protocol = _resolve_protocol(api_settings, global_protocol)
+    settings = resolve_settings(section)
+    if not settings["api_key"]:
+        raise ValueError("API key is not set")
+    model = settings["model"]
+    route = settings["protocol"]
 
     # check cache
-    cached = _load_cache(prompt, resp_type, log_title, model=model)
+    cached = _load_cache(prompt, log_title, model, attempt)
     if cached:
         rprint("use cache response")
         return cached
 
-    base_url = _pick_setting(api_settings, "base_url", global_base_url)
-    llm_support_json = _pick_setting(api_settings, "llm_support_json", global_llm_support_json)
-    timeout = config.to_int(_pick_setting(api_settings, "request_timeout_sec", global_timeout), 300, min_value=1)
-    retries = config.to_int(_pick_setting(api_settings, "request_retries", global_retries), 5, min_value=0)
-    retry_delay = config.to_float(
-        _pick_setting(api_settings, "request_retry_delay_sec", global_retry_delay),
-        1,
-        min_value=0,
-    )
-    # 思考等级与模型绑定，不从全局继承：子模块只读自己 api 块里的值
-    if api_settings is None:
-        reasoning_effort = config.get("api.reasoning_effort", "")
-    else:
-        reasoning_effort = api_settings.get("reasoning_effort", "")
-    reasoning_effort = str(reasoning_effort or "").strip()
-    route = protocol
-
-    total_attempts = retries + 1
+    timeout = settings["timeout"]
+    retry_delay = settings["retry_delay"]
+    reasoning_effort = settings["reasoning_effort"]
+    total_attempts = settings["retries"] + 1
     last_exception = None
 
-    for attempt in range(1, total_attempts + 1):
+    for request_attempt in range(1, total_attempts + 1):
         req_start = time.time()
         rprint(
             f"[cyan]LLM request start[/cyan] model={model} route={route} timeout={timeout}s "
             f"effort={reasoning_effort or '-'} "
-            f"log={log_title} attempt={attempt}/{total_attempts}"
+            f"log={log_title} attempt={request_attempt}/{total_attempts}"
         )
         try:
-            if protocol == "messages":
-                resp_content, resp = _ask_claude_messages(
-                    prompt=prompt,
-                    resp_type=resp_type,
-                    model=model,
-                    base_url=base_url,
-                    api_key=api_key,
-                    llm_support_json=llm_support_json,
-                    timeout=timeout,
-                    json_schema=json_schema,
-                    reasoning_effort=reasoning_effort,
-                )
-            elif protocol == "responses":
-                resp_content, resp = _ask_openai_responses(
-                    prompt=prompt,
-                    resp_type=resp_type,
-                    model=model,
-                    base_url=base_url,
-                    api_key=api_key,
-                    llm_support_json=llm_support_json,
-                    timeout=timeout,
-                    json_schema=json_schema,
-                    reasoning_effort=reasoning_effort,
-                )
+            if route == "messages":
+                resp_content, resp = _ask_claude_messages(prompt, schema, settings)
+            elif route == "responses":
+                resp_content, resp = _ask_openai_responses(prompt, schema, settings)
             else:
-                resp_content, resp = _ask_gpt_chat(
-                    prompt=prompt,
-                    resp_type=resp_type,
-                    model=model,
-                    base_url=base_url,
-                    api_key=api_key,
-                    llm_support_json=llm_support_json,
-                    timeout=timeout,
-                    json_schema=json_schema,
-                    reasoning_effort=reasoning_effort,
-                )
+                resp_content, resp = _ask_gpt_chat(prompt, schema, settings)
 
             req_cost = round(time.time() - req_start, 2)
             rprint(
                 f"[green]LLM request done[/green] model={model} route={route} cost={req_cost}s "
-                f"log={log_title} attempt={attempt}/{total_attempts}"
+                f"log={log_title} attempt={request_attempt}/{total_attempts}"
             )
 
             # check if the response format is valid
             if valid_def:
                 valid_resp = valid_def(resp)
                 if valid_resp["status"] != "success":
-                    _save_cache(
+                    save_log(
                         model,
                         prompt,
                         resp_content,
-                        resp_type,
                         resp,
                         log_title="error",
                         message=valid_resp["message"],
+                        attempt=attempt,
                     )
                     raise ValueError(f"API response error: {valid_resp['message']}")
 
-            _save_cache(model, prompt, resp_content, resp_type, resp, log_title=log_title)
+            save_log(model, prompt, resp_content, resp, log_title=log_title, attempt=attempt)
             return resp
         except Exception as e:
             req_cost = round(time.time() - req_start, 2)
             last_exception = e
             rprint(
                 f"[red]LLM request failed[/red] model={model} route={route} cost={req_cost}s "
-                f"log={log_title} attempt={attempt}/{total_attempts} error={e}"
+                f"log={log_title} attempt={request_attempt}/{total_attempts} error={e}"
             )
-            if attempt < total_attempts and retry_delay > 0:
+            if request_attempt < total_attempts and retry_delay > 0:
                 rprint(f"[yellow]Retrying in {retry_delay}s...[/yellow]")
                 time.sleep(retry_delay)
 
     if last_exception:
         raise last_exception
     raise RuntimeError("LLM request failed with unknown error")
+
+
+# ------------
+# stream text
+# ------------
+
+def stream_text(prompt, settings, on_delta):
+    """流式请求纯文本，每收到一段文本调用一次 on_delta；返回 finish_reason。按 settings["protocol"] 分派。"""
+    if settings["protocol"] == "messages":
+        return _stream_claude_text(prompt, settings, on_delta)
+    if settings["protocol"] == "responses":
+        return _stream_openai_responses_text(prompt, settings, on_delta)
+    return _stream_openai_text(prompt, settings, on_delta)
+
+
+def _stream_openai_text(prompt, request_settings, on_delta):
+    client_kwargs = {"api_key": request_settings["api_key"]}
+    if request_settings["base_url"]:
+        client_kwargs["base_url"] = _normalize_openai_base_url(request_settings["base_url"])
+
+    client = OpenAI(**client_kwargs)
+    params = dict(
+        model=request_settings["model"],
+        messages=[{"role": "user", "content": prompt}],
+        timeout=request_settings["timeout"],
+        stream=True,
+    )
+    if request_settings.get("reasoning_effort"):
+        params["reasoning_effort"] = request_settings["reasoning_effort"]
+    stream = client.chat.completions.create(**params)
+
+    finish_reason = None
+    try:
+        for chunk in stream:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+
+            choice = choices[0]
+            delta = getattr(choice, "delta", None)
+            content = getattr(delta, "content", None) if delta else None
+            if isinstance(content, list):
+                content = "".join(
+                    part.get("text", "") if isinstance(part, dict) else str(part)
+                    for part in content
+                )
+            if content:
+                on_delta(content)
+
+            chunk_finish_reason = getattr(choice, "finish_reason", None)
+            if chunk_finish_reason:
+                finish_reason = chunk_finish_reason
+    finally:
+        close_stream = getattr(stream, "close", None)
+        if callable(close_stream):
+            close_stream()
+
+    return finish_reason or "stop"
+
+def _describe_responses_error(error_info):
+    if error_info is None:
+        return "unknown error"
+    code = getattr(error_info, "code", None)
+    message = getattr(error_info, "message", None)
+    if code and message:
+        return f"{code}: {message}"
+    return str(message or code or "unknown error")
+
+def _stream_openai_responses_text(prompt, request_settings, on_delta):
+    client_kwargs = {"api_key": request_settings["api_key"]}
+    if request_settings["base_url"]:
+        client_kwargs["base_url"] = request_settings["base_url"]
+
+    client = OpenAI(**client_kwargs)
+    params = dict(
+        model=request_settings["model"],
+        input=prompt,
+        timeout=request_settings["timeout"],
+        stream=True,
+    )
+    if request_settings.get("reasoning_effort"):
+        params["reasoning"] = {"effort": request_settings["reasoning_effort"]}
+    stream = client.responses.create(**params)
+
+    completed = False
+    try:
+        for event in stream:
+            event_type = getattr(event, "type", None)
+            if event_type == "response.output_text.delta":
+                delta_text = getattr(event, "delta", None)
+                if delta_text:
+                    on_delta(delta_text)
+            elif event_type == "response.completed":
+                completed = True
+                break
+            elif event_type == "response.failed":
+                failed_response = getattr(event, "response", None)
+                raise ValueError(
+                    "OpenAI Responses stream failed: "
+                    f"{_describe_responses_error(getattr(failed_response, 'error', None))}"
+                )
+            elif event_type == "response.incomplete":
+                incomplete_response = getattr(event, "response", None)
+                details = getattr(incomplete_response, "incomplete_details", None)
+                reason = getattr(details, "reason", None)
+                raise ValueError(
+                    f"OpenAI Responses stream incomplete: {reason or 'unknown reason'}"
+                )
+            elif event_type == "error":
+                raise ValueError(
+                    f"OpenAI Responses stream error: {_describe_responses_error(event)}"
+                )
+    finally:
+        close_stream = getattr(stream, "close", None)
+        if callable(close_stream):
+            close_stream()
+
+    if not completed:
+        raise ValueError("OpenAI Responses stream ended without response.completed")
+
+    return "stop"
+
+def _stream_claude_text(prompt, request_settings, on_delta):
+    if not request_settings["base_url"]:
+        raise ValueError("Claude base_url is not set")
+
+    url = _normalize_claude_messages_url(request_settings["base_url"])
+    headers = {
+        "x-api-key": request_settings["api_key"],
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    payload = {
+        "model": request_settings["model"],
+        "max_tokens": 8192,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": True,
+    }
+    if request_settings.get("reasoning_effort"):
+        payload["output_config"] = {"effort": request_settings["reasoning_effort"]}
+
+    finish_reason = None
+    with requests.post(
+        url,
+        headers=headers,
+        json=payload,
+        timeout=request_settings["timeout"],
+        stream=True,
+    ) as response:
+        response.raise_for_status()
+        event_type = None
+        data_lines = []
+
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if raw_line is None:
+                continue
+
+            line = raw_line.strip()
+            if not line:
+                if data_lines:
+                    payload_text = "\n".join(data_lines)
+                    payload_data = json.loads(payload_text)
+
+                    if event_type == "content_block_delta":
+                        delta = payload_data.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            text = delta.get("text", "")
+                            if text:
+                                on_delta(text)
+                    elif event_type == "message_delta":
+                        finish_reason = (
+                            payload_data.get("delta", {}).get("stop_reason") or finish_reason
+                        )
+                    elif event_type == "error":
+                        error_info = payload_data.get("error", payload_data)
+                        raise ValueError(f"Claude streaming error: {error_info}")
+                    elif event_type == "message_stop":
+                        finish_reason = finish_reason or "stop"
+                        break
+
+                event_type = None
+                data_lines = []
+                continue
+
+            if line.startswith(":"):
+                continue
+            if line.startswith("event:"):
+                event_type = line[len("event:") :].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:") :].strip())
+
+    return finish_reason or "stop"

@@ -5,7 +5,7 @@ from videotrx import paths
 from videotrx.prompts import get_split_prompt
 from videotrx import config
 from videotrx.language import get_joiner, source_language
-from videotrx.llm import ask_gpt
+from videotrx.llm import ask_json
 from videotrx.utils import read_json, write_json
 from rich.console import Console
 from rich.table import Table
@@ -80,17 +80,17 @@ def split_sentence(sentence, num_parts, char_limit=100, index=-1, retry_attempt=
 
         return {"status": "success", "message": "Split completed"}
     
-    response_data = ask_gpt(
-        split_prompt + " " * retry_attempt,
-        resp_type='json',
-        valid_def=valid_split,
-        log_title='split_by_meaning',
-        json_schema={
+    response_data = ask_json(
+        split_prompt,
+        {
             "type": "object",
             "properties": {"split": {"type": "string"}},
             "required": ["split"],
             "additionalProperties": False,
         },
+        valid_def=valid_split,
+        log_title='split_by_meaning',
+        attempt=retry_attempt,
     )
     validation = valid_split(response_data)
     if validation["status"] != "success":

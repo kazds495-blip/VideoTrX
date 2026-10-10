@@ -11,7 +11,7 @@ from rich.panel import Panel
 from rich.console import Console
 from rich.table import Table
 from videotrx import config
-from videotrx.llm import ask_gpt
+from videotrx.llm import ask_json
 from videotrx.utils import append_jsonl, except_handler, read_json, write_json
 console = Console()
 
@@ -344,9 +344,6 @@ def align_subs(src_sub: str, tr_sub: str, src_part: str, target_max_length: int)
 
         return {"status": "success", "message": "Align completed"}
 
-    # 局部导入以避免模块级循环依赖，超宽重译沿用全文润色设置。
-    from videotrx.pipeline.polish import _load_single_pass_full_polish_api_settings
-
     # 每段的键名随序号变化（src_part_i / target_part_i），用 anyOf 列出各序号的固定结构；
     # 数组长度与顺序由 valid_align 校验
     align_item_variants = [
@@ -371,13 +368,13 @@ def align_subs(src_sub: str, tr_sub: str, src_part: str, target_max_length: int)
         "additionalProperties": False,
     }
 
-    parsed = ask_gpt(
+    # 超宽重译沿用全文润色的 LLM 设置
+    parsed = ask_json(
         align_prompt,
-        resp_type='json',
+        align_schema,
         valid_def=valid_align,
         log_title='align_subs',
-        api_settings=_load_single_pass_full_polish_api_settings(),
-        json_schema=align_schema,
+        section="polish",
     )
     align_data = parsed['align']
     tr_parts = [item[f'target_part_{i+1}'].strip() for i, item in enumerate(align_data)]
@@ -401,12 +398,11 @@ def _align_target_semantics_batch(batch_items):
 
     try:
         prompt = get_target_semantic_alignment_prompt(batch_items)
-        response_data = ask_gpt(
+        response_data = ask_json(
             prompt,
-            resp_type='json',
+            TARGET_ALIGNMENT_SCHEMA,
             valid_def=valid_target_alignment,
             log_title='align_target_semantics',
-            json_schema=TARGET_ALIGNMENT_SCHEMA,
         )
         valid, message, parts_by_id = _validate_target_alignment_response(
             response_data,

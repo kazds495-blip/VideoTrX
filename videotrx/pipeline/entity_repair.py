@@ -7,7 +7,7 @@ from rich import print as rprint
 
 from videotrx import config, paths
 from videotrx.language import get_joiner, source_language
-from videotrx.llm import ask_gpt
+from videotrx.llm import ask_json
 from videotrx.prompts import get_rough_split_entity_repair_prompt
 from videotrx.utils import append_jsonl, write_json
 
@@ -119,21 +119,6 @@ def _valid_repair_response(response_data):
     return {"status": "success", "message": "Rough split entity repair response validated"}
 
 
-def _get_repair_api_settings() -> Dict:
-    # Empty value means fallback to global api.* settings.
-    return {
-        "key": config.get("entity_repair.api.key", ""),
-        "base_url": config.get("entity_repair.api.base_url", ""),
-        "model": config.get("entity_repair.api.model", ""),
-        "protocol": config.get("entity_repair.api.protocol", ""),
-        "llm_support_json": config.get_bool("entity_repair.api.llm_support_json", True),
-        "request_timeout_sec": config.get("entity_repair.api.request_timeout_sec", None),
-        "request_retries": config.get("entity_repair.api.request_retries", None),
-        "request_retry_delay_sec": config.get("entity_repair.api.request_retry_delay_sec", None),
-        "reasoning_effort": config.get("entity_repair.api.reasoning_effort", ""),
-    }
-
-
 def _confidence_rank(value: str) -> int:
     normalized = str(value).strip().lower().replace(" ", "_")
     ranking = {
@@ -208,13 +193,12 @@ def _collect_suggestions(boundary_pairs: List[Dict]) -> List[Dict]:
             json.dumps(chunk, ensure_ascii=False, indent=2)
         )
         try:
-            response = ask_gpt(
+            response = ask_json(
                 prompt,
-                resp_type="json",
+                REPAIR_RESPONSE_SCHEMA,
                 valid_def=_valid_repair_response,
                 log_title=LOG_TITLE,
-                api_settings=_get_repair_api_settings(),
-                json_schema=REPAIR_RESPONSE_SCHEMA,
+                section="entity_repair",
             )
         except Exception as e:
             rprint(f"[yellow]Entity repair chunk skipped due to LLM error: {e}[/yellow]")

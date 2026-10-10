@@ -8,7 +8,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from videotrx import config, paths
-from videotrx.llm import ask_gpt
+from videotrx.llm import ask_json
 from videotrx.pipeline.polish import (
     _cleanup_single_pass_full_polish_progress,
     _write_polish_changelog,
@@ -64,17 +64,17 @@ def translate_lines(
         for retry in range(3):
             # 行号顶层键由 schema 严格约束：strict tool use 下模型无法再包一层
             line_keys = [str(i) for i in range(1, length + 1)]
-            result = ask_gpt(
-                prompt + retry * " ",
-                resp_type="json",
-                valid_def=valid_single_pass,
-                log_title="translate_single_pass",
-                json_schema={
+            result = ask_json(
+                prompt,
+                {
                     "type": "object",
                     "properties": {key: {"type": "string"} for key in line_keys},
                     "required": line_keys,
                     "additionalProperties": False,
                 },
+                valid_def=valid_single_pass,
+                log_title="translate_single_pass",
+                attempt=retry,
             )
             empty_lines = [key for key in line_keys if not result[key].strip()]
             if empty_lines:
