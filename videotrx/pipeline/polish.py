@@ -15,7 +15,6 @@ console = Console()
 POLISH_LINE_PATTERN = re.compile(r"^\s*\[(\d+)\]\s*:?[ \t]*(.*?)\s*$")
 POLISH_PROGRESS_REPORT_STEP = 20
 POLISH_PROGRESS_STATE_VERSION = 2
-POLISH_TAIL_PLACEHOLDER = "拜拜"
 POLISH_STREAM_SNAPSHOT_INTERVAL_SEC = 0.5
 POLISH_SAFE_RESERVE_LINES = 10
 POLISH_TAIL_RESERVE_LINES = 1
@@ -59,13 +58,11 @@ def _render_single_pass_full_polish_preview(
     parsed_max_line,
     confirmed_max_line,
     confirm_cap_line,
-    final_line_placeholder_active,
-    final_line_placeholder_text,
     completion_reason,
 ):
     next_line = (
         line_count + 1
-        if status in {"completed", "completed_with_placeholder"}
+        if status == "completed"
         else min(confirmed_max_line + 1, line_count + 1)
     )
     header_lines = [
@@ -74,7 +71,6 @@ def _render_single_pass_full_polish_preview(
         f"# confirmed_max_line: {confirmed_max_line}",
         f"# confirm_cap_line: {confirm_cap_line}",
         f"# next_line: {next_line}",
-        f"# final_line_placeholder_active: {str(bool(final_line_placeholder_active)).lower()}",
         f"# completion_reason: {completion_reason or 'none'}",
         "# confirmed_lines:",
     ]
@@ -82,10 +78,6 @@ def _render_single_pass_full_polish_preview(
         f"[{i}] {_sanitize_single_line_text(line)}"
         for i, line in enumerate(confirmed_lines, 1)
     ]
-    if final_line_placeholder_active and line_count > 0:
-        body_lines.append(
-            f"[{line_count}] {_sanitize_single_line_text(final_line_placeholder_text or POLISH_TAIL_PLACEHOLDER)}"
-        )
     return "\n".join(header_lines + body_lines)
 
 def _persist_single_pass_full_polish_stream_snapshot(
@@ -95,7 +87,6 @@ def _persist_single_pass_full_polish_stream_snapshot(
     parsed_max_line,
     confirmed_max_line,
     confirm_cap_line,
-    final_line_placeholder_active,
     raw_content,
 ):
     header_lines = [
@@ -104,7 +95,6 @@ def _persist_single_pass_full_polish_stream_snapshot(
         f"# confirmed_max_line: {confirmed_max_line}",
         f"# confirm_cap_line: {confirm_cap_line}",
         f"# target_end_line: {line_count}",
-        f"# final_line_placeholder_active: {str(bool(final_line_placeholder_active)).lower()}",
         "# raw_stream:",
     ]
     content = "\n".join(header_lines)
@@ -122,8 +112,6 @@ def _persist_single_pass_full_polish_progress_state(
     confirmed_max_line,
     confirm_cap_line,
     status="in_progress",
-    final_line_placeholder_active=False,
-    final_line_placeholder_text=None,
     completion_reason=None,
 ):
     normalized_polished_lines = [
@@ -147,10 +135,6 @@ def _persist_single_pass_full_polish_progress_state(
         "confirm_cap_line": confirm_cap_line,
         "base_draft_lines": draft_lines,
         "confirmed_lines": confirmed_lines,
-        "final_line_placeholder_active": bool(final_line_placeholder_active),
-        "final_line_placeholder_text": _sanitize_single_line_text(
-            final_line_placeholder_text or POLISH_TAIL_PLACEHOLDER
-        ),
         "completion_reason": completion_reason,
     }
     _atomic_write_json(paths.POLISH_PROGRESS, state)
@@ -163,8 +147,6 @@ def _persist_single_pass_full_polish_progress_state(
             parsed_max_line=parsed_max_line,
             confirmed_max_line=confirmed_max_line,
             confirm_cap_line=confirm_cap_line,
-            final_line_placeholder_active=final_line_placeholder_active,
-            final_line_placeholder_text=final_line_placeholder_text,
             completion_reason=completion_reason,
         ),
     )
@@ -194,7 +176,6 @@ def _restore_single_pass_full_polish_progress(src_lines, draft_lines, summary_pr
             confirmed_max_line=0,
             confirm_cap_line=0,
             status="in_progress",
-            final_line_placeholder_active=False,
         )
         return {
             "draft_lines": clean_draft_lines,
@@ -205,7 +186,6 @@ def _restore_single_pass_full_polish_progress(src_lines, draft_lines, summary_pr
             "parsed_max_line": 0,
             "confirmed_max_line": 0,
             "confirm_cap_line": 0,
-            "final_line_placeholder_active": False,
             "completion_reason": None,
         }
 
@@ -243,15 +223,8 @@ def _restore_single_pass_full_polish_progress(src_lines, draft_lines, summary_pr
                 confirmed_max_line,
                 min(int(state.get("confirm_cap_line", confirmed_max_line)), line_count),
             )
-            final_line_placeholder_active = bool(state.get("final_line_placeholder_active"))
-            final_line_placeholder_text = _sanitize_single_line_text(
-                state.get("final_line_placeholder_text", POLISH_TAIL_PLACEHOLDER)
-            )
             completion_reason = state.get("completion_reason")
             status = state.get("status", "in_progress")
-
-            if final_line_placeholder_active and line_count > 0:
-                polished_lines[-1] = final_line_placeholder_text
 
             if _hash_lines(clean_draft_lines) != state.get("draft_hash"):
                 console.print(
@@ -259,13 +232,7 @@ def _restore_single_pass_full_polish_progress(src_lines, draft_lines, summary_pr
                     "Resuming from the saved draft instead of the newly generated draft.[/yellow]"
                 )
 
-            completed = status in {"completed", "completed_with_placeholder"}
-            if completed:
-                if status == "completed_with_placeholder":
-                    console.print(
-                        "[yellow]Single-pass full polish progress already completed with placeholder final line. "
-                        "Reusing saved result.[/yellow]"
-                    )
+            if status == "completed":
                 return {
                     "draft_lines": saved_draft_lines,
                     "polished_lines": polished_lines,
@@ -275,7 +242,6 @@ def _restore_single_pass_full_polish_progress(src_lines, draft_lines, summary_pr
                     "parsed_max_line": parsed_max_line,
                     "confirmed_max_line": confirmed_max_line,
                     "confirm_cap_line": confirm_cap_line,
-                    "final_line_placeholder_active": final_line_placeholder_active,
                     "completion_reason": completion_reason,
                 }
 
@@ -295,7 +261,6 @@ def _restore_single_pass_full_polish_progress(src_lines, draft_lines, summary_pr
                 "parsed_max_line": parsed_max_line,
                 "confirmed_max_line": confirmed_max_line,
                 "confirm_cap_line": confirm_cap_line,
-                "final_line_placeholder_active": final_line_placeholder_active,
                 "completion_reason": completion_reason,
             }
 
@@ -310,7 +275,6 @@ def _restore_single_pass_full_polish_progress(src_lines, draft_lines, summary_pr
         confirmed_max_line=0,
         confirm_cap_line=0,
         status="in_progress",
-        final_line_placeholder_active=False,
     )
     return {
         "draft_lines": clean_draft_lines,
@@ -321,7 +285,6 @@ def _restore_single_pass_full_polish_progress(src_lines, draft_lines, summary_pr
         "parsed_max_line": 0,
         "confirmed_max_line": 0,
         "confirm_cap_line": 0,
-        "final_line_placeholder_active": False,
         "completion_reason": None,
     }
 
@@ -385,7 +348,6 @@ def _commit_polish_stream_progress(
     committed_count,
     parsed_max_line_before,
     confirm_cap_line_before,
-    final_line_placeholder_active,
     allow_last_without_newline=False,
 ):
     parsed_lines = _parse_polish_stream_lines(
@@ -425,51 +387,18 @@ def _commit_polish_stream_progress(
             confirmed_max_line=confirmed_max_line,
             confirm_cap_line=confirm_cap_line,
             status="in_progress",
-            final_line_placeholder_active=final_line_placeholder_active,
             completion_reason=None,
         )
 
     completion_reason = None
     status = "in_progress"
 
-    if (
-        line_count > 0
-        and not final_line_placeholder_active
-        and confirmed_max_line >= line_count - 1
-    ):
-        polished_lines[line_count - 1] = POLISH_TAIL_PLACEHOLDER
-        final_line_placeholder_active = True
-        status = "completed_with_placeholder"
-        completion_reason = "final_line_placeholder"
-        console.print(
-            f"[yellow]Confirmed line {line_count - 1}. "
-            f"Pre-wrote fallback for final line {line_count}: `{POLISH_TAIL_PLACEHOLDER}`.[/yellow]"
-        )
-        _persist_single_pass_full_polish_progress_state(
-            src_lines=src_lines,
-            draft_lines=draft_lines,
-            polished_lines=polished_lines,
-            summary_prompt=summary_prompt,
-            parsed_max_line=parsed_max_line,
-            confirmed_max_line=confirmed_max_line,
-            confirm_cap_line=confirm_cap_line,
-            status=status,
-            final_line_placeholder_active=True,
-            final_line_placeholder_text=POLISH_TAIL_PLACEHOLDER,
-            completion_reason=completion_reason,
-        )
-
     if line_count > 0 and parsed_max_line >= line_count:
         final_text = parsed_map.get(line_count)
-        if final_text:
+        # 末行与其他行一样：只有行号没有内容时保留为空
+        if final_text is not None:
             polished_lines[line_count - 1] = final_text
-            if final_line_placeholder_active:
-                console.print(
-                    f"[green][{line_count}][/green] {final_text} [dim](overrode placeholder)[/dim]"
-                )
-            else:
-                console.print(f"[green][{line_count}][/green] {final_text}")
-            final_line_placeholder_active = False
+            console.print(f"[green][{line_count}][/green] {final_text}")
             confirmed_max_line = line_count
             committed_count = max(0, confirmed_max_line - start_line + 1)
             confirm_cap_line = max(confirm_cap_line, line_count)
@@ -484,7 +413,6 @@ def _commit_polish_stream_progress(
                 confirmed_max_line=confirmed_max_line,
                 confirm_cap_line=confirm_cap_line,
                 status=status,
-                final_line_placeholder_active=False,
                 completion_reason=completion_reason,
             )
 
@@ -503,7 +431,6 @@ def _commit_polish_stream_progress(
                 confirmed_max_line=confirmed_max_line,
                 confirm_cap_line=confirm_cap_line,
                 status=status,
-                final_line_placeholder_active=final_line_placeholder_active,
                 completion_reason=None,
             )
 
@@ -513,7 +440,6 @@ def _commit_polish_stream_progress(
         "parsed_max_line": parsed_max_line,
         "confirmed_max_line": confirmed_max_line,
         "confirm_cap_line": confirm_cap_line,
-        "final_line_placeholder_active": final_line_placeholder_active,
         "status": status,
         "completion_reason": completion_reason,
     }
@@ -563,7 +489,6 @@ def _run_single_pass_full_polish_round(
     error = None
     parsed_max_line = start_line - 1
     confirm_cap_line = start_line - 1
-    final_line_placeholder_active = False
 
     def persist_stream_snapshot(force=False):
         nonlocal last_stream_snapshot_at
@@ -576,7 +501,6 @@ def _run_single_pass_full_polish_round(
             parsed_max_line=parsed_max_line,
             confirmed_max_line=start_line - 1 + committed_count,
             confirm_cap_line=confirm_cap_line,
-            final_line_placeholder_active=final_line_placeholder_active,
             raw_content=raw_content,
         )
         last_stream_snapshot_at = now
@@ -595,7 +519,7 @@ def _run_single_pass_full_polish_round(
         last_reported_count = committed_count
 
     def on_delta(text):
-        nonlocal raw_content, committed_count, parsed_max_line, confirm_cap_line, final_line_placeholder_active
+        nonlocal raw_content, committed_count, parsed_max_line, confirm_cap_line
         raw_content += text
         if "\n" not in text:
             persist_stream_snapshot(force=False)
@@ -612,13 +536,11 @@ def _run_single_pass_full_polish_round(
             committed_count,
             parsed_max_line,
             confirm_cap_line,
-            final_line_placeholder_active,
             allow_last_without_newline=False,
         )
         committed_count = progress_state["committed"]
         parsed_max_line = progress_state["parsed_max_line"]
         confirm_cap_line = progress_state["confirm_cap_line"]
-        final_line_placeholder_active = progress_state["final_line_placeholder_active"]
         report_progress(force=False)
         persist_stream_snapshot(force=True)
 
@@ -638,13 +560,11 @@ def _run_single_pass_full_polish_round(
             committed_count,
             parsed_max_line,
             confirm_cap_line,
-            final_line_placeholder_active,
             allow_last_without_newline=error is None,
         )
         committed_count = progress_state["committed"]
         parsed_max_line = progress_state["parsed_max_line"]
         confirm_cap_line = progress_state["confirm_cap_line"]
-        final_line_placeholder_active = progress_state["final_line_placeholder_active"]
         persist_stream_snapshot(force=True)
         report_progress(force=True)
         _log_single_pass_full_polish_round(
@@ -658,14 +578,10 @@ def _run_single_pass_full_polish_round(
             error=error,
         )
 
-    if final_line_placeholder_active:
-        committed_count = line_count - start_line + 1
-
     return {
         "committed": committed_count,
         "parsed_max_line": parsed_max_line,
         "confirm_cap_line": confirm_cap_line,
-        "final_line_placeholder_active": final_line_placeholder_active,
         "finish_reason": finish_reason,
         "error": error,
     }
@@ -676,14 +592,12 @@ def _write_polish_changelog(
     final_lines,
     *,
     stage="polish",
-    final_line_placeholder_active=False,
     note="",
 ):
     """只记录实际采用的译文，日志失败不影响字幕产出。"""
     try:
         records = []
         for row, (source, draft, final) in enumerate(zip(src_lines, draft_lines, final_lines), 1):
-            is_placeholder = final_line_placeholder_active and row == len(final_lines)
             records.append({
                 "row": row,
                 "source": source,
@@ -691,12 +605,8 @@ def _write_polish_changelog(
                 "final": final,
                 "stage": stage,
                 "changed": final != draft,
-                "status": (
-                    "fallback" if stage == "polish_fallback"
-                    else "completed_with_placeholder" if is_placeholder
-                    else "polished"
-                ),
-                "note": note or ("末行使用既有占位文本" if is_placeholder else ""),
+                "status": "fallback" if stage == "polish_fallback" else "polished",
+                "note": note,
             })
         paths.POLISH_CHANGELOG.unlink(missing_ok=True)
         append_jsonl(paths.POLISH_CHANGELOG, records)
@@ -724,14 +634,10 @@ def polish_single_pass_full_text(src_lines, draft_lines, summary_prompt=None):
     next_line = resume_state["next_line"]
     no_progress_attempts = 0
     round_index = 0
-    final_line_placeholder_active = resume_state["final_line_placeholder_active"]
 
     if resume_state["completed"]:
         console.print("[green]Single-pass full polish already completed in progress file. Reusing saved result.[/green]")
-        _write_polish_changelog(
-            src_lines, draft_lines, polished_lines,
-            final_line_placeholder_active=final_line_placeholder_active,
-        )
+        _write_polish_changelog(src_lines, draft_lines, polished_lines)
         return polished_lines
 
     while next_line <= line_count:
@@ -758,7 +664,6 @@ def polish_single_pass_full_text(src_lines, draft_lines, summary_prompt=None):
             round_index=round_index,
         )
 
-        final_line_placeholder_active = round_result["final_line_placeholder_active"]
         committed = round_result["committed"]
         if committed > 0:
             next_line += committed
@@ -797,8 +702,5 @@ def polish_single_pass_full_text(src_lines, draft_lines, summary_prompt=None):
     if empty_lines:
         console.print(f"[yellow]Full polish kept empty lines: {empty_lines}[/yellow]")
 
-    _write_polish_changelog(
-        src_lines, draft_lines, polished_lines,
-        final_line_placeholder_active=final_line_placeholder_active,
-    )
+    _write_polish_changelog(src_lines, draft_lines, polished_lines)
     return polished_lines
