@@ -1,0 +1,11 @@
+PySide6
+yt-dlp[default]
+pandas==2.2.3
+numpy==1.26.4
+spacy==3.7.4
+autocorrect-py
+openai==2.54.0
+json-repair
+requests==2.32.3
+rich
+PyYAML==6.0.2

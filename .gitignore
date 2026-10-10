@@ -1,0 +1,13 @@
+config.yaml
+CLAUDE.md
+plans/
+output/
+archive/
+tests/
+bin/
+tools/
+.venv/
+__pycache__/
+*.pyc
+*.log
+.claude/

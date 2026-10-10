@@ -1,0 +1,79 @@
+# 源语言：auto 表示使用转写时检测到的语言；也可写语言代码，如 en
+source_language: auto
+target_language: '简体中文'
+# 并发线程数：实体修复、语义断句、分块翻译、字幕切分都用这里
+max_workers: 3
+
+# 主 LLM：下方未单独配置的环节都用这里
+api:
+  key: 'YOUR_KEY_HERE'
+  base_url: 'https://api.openai.com/v1'
+  model: 'YOUR_MODEL'
+  # 调用协议：chat_completions / responses / messages
+  protocol: 'chat_completions'
+  # 模型支持 JSON Schema 结构化输出时为 true
+  llm_support_json: true
+  request_timeout_sec: 300
+  request_retries: 5
+  request_retry_delay_sec: 1
+  # 思考等级：留空不传；写什么就原样传什么（如 low / medium / high）
+  reasoning_effort: ''
+
+# 全文润色与超长字幕重译使用的 LLM
+# 留空的项继承 api；reasoning_effort 只看本块，不继承
+# english_correction、entity_repair 也可以加同样的 api 子块单独配置
+polish:
+  api:
+    key: ''
+    base_url: ''
+    model: ''
+    protocol: ''
+    llm_support_json: true
+    request_timeout_sec: 120
+    request_retries: 2
+    request_retry_delay_sec: 1
+    reasoning_effort: ''
+
+# MAI-Transcribe-2 转写与静音贴边
+mai:
+  key: 'YOUR_KEY_HERE'
+  endpoint: 'https://your-resource.services.ai.azure.com'
+  model: 'MAI-Transcribe-2'
+  snap_lead_ms: 20            # 贴边：首词起点提前量
+  snap_tail_ms: 10            # 贴边：末词终点延后量
+  snap_max_adjust_ms: 500     # 贴边：单次最大偏移，超过则保留 API 原值
+  silence_threshold_db: -20   # 静音检测：比这更安静算静音
+  silence_min_dur: 0.1        # 静音检测：短于此的静音不计
+
+# yt-dlp 下载
+download:
+  # 代理地址，如 http://127.0.0.1:7890；留空不用代理
+  proxy: ''
+  # 从浏览器读取 cookies，如 firefox、chrome、firefox:<配置目录路径>；留空不读
+  cookies_from_browser: ''
+
+english_correction:
+  enabled: true
+  only_when_english: true     # 只在源语言为英语时校正
+
+entity_repair:
+  enabled: true
+  only_when_space_joiner: true
+  max_pairs_per_request: 120
+  boundary_window_words: 8
+  max_fragment_words: 4
+  score_base_words: 20        # 修复方向评分的词数基准
+
+nlp_split:
+  pause_threshold_sec: 1.5    # 词间停顿超过此值时强制断句
+
+terminology:
+  source_chars: 8000          # 摘要与术语提取读取的原文字符数上限
+
+subtitle:
+  source_max_length: 90       # 英文一行字符上限，包含空格、标点
+  target_max_length: 25       # 中文一行宽度上限，单位为汉字宽度
+  style:
+    chinese_font: 'Aa研宋'     # 中文宽度表 TARGET_ASCII_WIDTHS 按此字体测得
+    english_font: 'Oswald'
+    font_size: 70
