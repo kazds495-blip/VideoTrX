@@ -42,9 +42,11 @@ def find_split_positions(original, modified):
 
     return split_positions
 
-def split_sentence(sentence, num_parts, char_limit=100, index=-1, retry_attempt=0):
+def split_sentence(sentence, min_parts, max_parts=None, char_limit=100, index=-1, retry_attempt=0):
     """Split a long sentence using GPT and return the result as a string."""
-    split_prompt = get_split_prompt(sentence, num_parts, char_limit)
+    if max_parts is None:
+        max_parts = min_parts
+    split_prompt = get_split_prompt(sentence, min_parts, max_parts, char_limit)
 
     def valid_split(response_data):
         if not isinstance(response_data, dict) or "split" not in response_data:
@@ -125,14 +127,15 @@ def parallel_split_sentences(sentences, max_length, max_workers, retry_attempt=0
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         for index, sentence in enumerate(sentences):
             # 按字符总数判断，空格和标点均计入。
-            num_parts = math.ceil(len(sentence) / max_length)
+            min_parts = math.ceil(len(sentence) / max_length)
+            max_parts = min_parts + 2
             if len(sentence) > max_length:
-                future = executor.submit(split_sentence, sentence, num_parts, max_length, index=index, retry_attempt=retry_attempt)
-                futures.append((future, index, num_parts, sentence))
+                future = executor.submit(split_sentence, sentence, min_parts, max_parts, max_length, index=index, retry_attempt=retry_attempt)
+                futures.append((future, index, sentence))
             else:
                 new_sentences[index] = [sentence]
 
-        for future, index, num_parts, sentence in futures:
+        for future, index, sentence in futures:
             split_result = future.result()
             if split_result:
                 split_lines = split_result.strip().split('\n')

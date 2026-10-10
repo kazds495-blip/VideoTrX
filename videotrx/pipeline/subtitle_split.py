@@ -539,7 +539,7 @@ def split_align_subs(
         mode = split_item["mode"]
         source = split_item["source"]
         target = split_item["target"]
-        split_src = split_sentence(source, num_parts=2, char_limit=SOURCE_MAX_LENGTH).strip()
+        split_src = split_sentence(source, min_parts=2, max_parts=2, char_limit=SOURCE_MAX_LENGTH).strip()
 
         if mode == "split+align_translation":
             src_parts, tr_parts = align_subs(source, target, split_src, TARGET_MAX_LENGTH)
