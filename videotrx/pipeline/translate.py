@@ -1,4 +1,5 @@
 import concurrent.futures
+import math
 
 import pandas as pd
 from rich import box
@@ -15,11 +16,54 @@ from videotrx.pipeline.polish import (
     polish_single_pass_full_text,
 )
 from videotrx.pipeline.subtitle_render import get_sentence_timestamps
+from videotrx.pipeline.subtitle_split import target_display_length
 from videotrx.pipeline.terminology import search_things_to_note_in_prompt
 from videotrx.prompts import generate_shared_prompt, get_prompt_single_pass
 from videotrx.utils import read_json, write_json
 
 console = Console()
+
+
+def adjacent_line(n, line_count):
+    """空行 n 的相邻行：n > 1 取上一行，n = 1 取下一行；整块只有一行时没有相邻行。"""
+    if n > 1:
+        return n - 1
+    return 2 if line_count > 1 else None
+
+
+def empty_line_feedback(result, empty_lines, line_count):
+    """根据上一次的结果，为每个空行生成一条反馈，拼成追加到提示词末尾的段落。"""
+    limit = config.get("subtitle.target_max_length")
+    feedback = []
+    for n in empty_lines:
+        m = adjacent_line(n, line_count)
+        if m is None:
+            feedback.append(f"第 {n} 行是空行，请输出这一行的译文。")
+            continue
+        width = target_display_length(result[str(m)])
+        # 与字幕切分相同：小数部分不计
+        if math.floor(width) > limit:
+            feedback.append(
+                f"第 {n} 行是空行，而第 {m} 行有 {width:.1f} 个汉字宽，超出单行上限 {limit} 约 {width - limit:.1f}，"
+                f"放不进一行。请把第 {m} 行和第 {n} 行的意思分配到这两行，每行各有自己的内容。"
+            )
+        else:
+            feedback.append(
+                f"第 {n} 行是空行。若第 {n} 行的意思已并入第 {m} 行，请让第 {n} 行输出与第 {m} 行完全相同的译文（重复行）。"
+            )
+    return "\n\n## 上次输出的问题\n上次输出中有空行，本次请修正：\n" + "\n".join(f"- {item}" for item in feedback)
+
+
+def fill_empty_lines(result, line_count):
+    """把空行填成相邻行的译文（重复行）；连续空行沿同一方向接续填充。"""
+    lines = [result[str(i)] for i in range(1, line_count + 1)]
+    for i in range(1, line_count):
+        if not lines[i].strip():
+            lines[i] = lines[i - 1]
+    for i in range(line_count - 2, -1, -1):
+        if not lines[i].strip():
+            lines[i] = lines[i + 1]
+    return {str(i): line for i, line in enumerate(lines, 1)}
 
 
 def translate_lines(
@@ -61,11 +105,12 @@ def translate_lines(
             return {"status": "success", "message": "Translation completed"}
 
         best_single_pass = None
+        retry_prompt = prompt
         for retry in range(3):
             # 行号顶层键由 schema 严格约束：strict tool use 下模型无法再包一层
             line_keys = [str(i) for i in range(1, length + 1)]
             result = ask_json(
-                prompt,
+                retry_prompt,
                 {
                     "type": "object",
                     "properties": {key: {"type": "string"} for key in line_keys},
@@ -76,7 +121,7 @@ def translate_lines(
                 log_title="translate_single_pass",
                 attempt=retry,
             )
-            empty_lines = [key for key in line_keys if not result[key].strip()]
+            empty_lines = [int(key) for key in line_keys if not result[key].strip()]
             if empty_lines:
                 if best_single_pass is None or len(empty_lines) < best_single_pass[0]:
                     best_single_pass = (len(empty_lines), result)
@@ -84,6 +129,8 @@ def translate_lines(
                     f"[yellow]Warning: single_pass translation of block {index} "
                     f"has empty lines {empty_lines}, retry...[/yellow]"
                 )
+                # 反馈只根据上一次的结果生成
+                retry_prompt = prompt + empty_line_feedback(result, empty_lines, length)
                 continue
 
             if len(result) == line_count:
@@ -92,13 +139,13 @@ def translate_lines(
                 console.print(
                     f"[yellow]Warning: single_pass translation of block {index} failed, retry...[/yellow]"
                 )
-        # 空行只影响本组中文，不动时间轴；保留空行最少的一次，交给全文润色和人工校对
+        # 取空行最少的一次，空行填成相邻行的译文（重复行），不再往下游传
         if best_single_pass is not None:
             console.print(
-                f"[yellow]Warning: keeping single_pass result of block {index} "
-                f"with {best_single_pass[0]} empty line(s).[/yellow]"
+                f"[yellow]Warning: filling {best_single_pass[0]} empty line(s) of block {index} "
+                f"with adjacent lines.[/yellow]"
             )
-            return best_single_pass[1]
+            return fill_empty_lines(best_single_pass[1], length)
         raise ValueError(
             f"single_pass translation of block {index} failed after 3 retries. "
             "Please check `output/gpt_log/error.json` for more details."

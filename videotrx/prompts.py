@@ -283,9 +283,10 @@ Translate the original {src_language} subtitles into high-quality {TARGET_LANGUA
 1.  **Semantic Distribution and Redundancy Elimination**:
     - **Problem**: A common AI error is when translating adjacent source lines (e.g., Line A and Line B), the translation for Line A improperly contains the combined meaning of A+B. Then, the translation for Line B unnecessarily repeats the meaning of B, creating redundancy.
     - **Your Task**: Identify and correct this. Instead of merging, you must **redistribute the semantic components** logically and naturally across the corresponding translated lines. The goal is a smooth, non-repetitive flow where both lines contribute meaningfully.
+    - 整行文字完全相同的重复行（见 Core Structural Constraints 第 4 条）不属于这里说的冗余。
 2.  **Completeness of Detail**: While eliminating redundancy, ensure no specific details, examples, or nuances are lost.
 3.  **Natural Sentence Splitting**: Keep natural split flow when one idea spans adjacent source lines.
-4.  **Word Order Flexibility**: You may reorder components across adjacent lines for natural flow, while preserving line count and meaning. 调整后每一行仍须有属于本行的内容。
+4.  **Word Order Flexibility**: You may reorder components across adjacent lines for natural flow, while preserving line count and meaning. 调整后每一行仍须有属于本行的内容；确实无法拆开时，按 Core Structural Constraints 第 4 条输出重复行。
 5.  **Fact Checking**: Keep proper nouns, brand names, technical terms, and cultural references accurate.
 6.  **Length Optimization**: Keep subtitles concise and readable.
 7.  **Cultural Localization**: Use natural target-language expressions without forced localization.
@@ -294,9 +295,9 @@ Translate the original {src_language} subtitles into high-quality {TARGET_LANGUA
 
 ### Core Structural Constraints (hard constraints)
 1. Line count must exactly match the number of source lines.
-2. Never leave empty translations.
-3. Never merge two source lines into one target line.
-4. Every source line must have a corresponding non-empty target line.
+2. Every source line must have a corresponding non-empty target line.
+3. 优先把意思分配到各自的行，每行译出属于本行的内容。
+4. 某一行的意思无法单独译出、必须与相邻行合成一句时，这几行都输出这句完整的译文，文字完全相同（重复行）。重复行在画面上就是同一句中文跨这几行英文保持显示。
 5. 键 "n" 只能是第 [n] 行的译文。把两行合成一行、再让后续各行依次前移，是最严重的错误。
 
 ### Cross-line Example
@@ -384,16 +385,17 @@ def get_prompt_single_pass_full_polish(
   2. 严禁合并、拆分、重排、增删行。
   3. 每一行输出必须是单行文本，禁止在行内再换行。
   4. 对应原文非空的行，译文不得为空。
-  5. 不允许改变原文事实、立场、褒贬色彩，不允许过度引申或过度翻译。
-  6. 必须纠正草译中的误译、漏译、语义偏移和明显直译腔。允许整句重译，也允许原样保留。
-  7. 以【原文 + 全文上下文】为唯一判断依据，草译只是参考，不是修改的上限。
-  8. 专有名词（人名、地名、机构名、产品名等）译法必须全文统一。
-  9. 同一术语和同类表达必须全文用词统一。
-  10. 不要对{src_language}原文做任何改写或纠错；本任务只润色{TARGET_LANGUAGE}译文。
-  11. 输出必须严格按行号顺序连续给出，不能跳号。
-  12. 每一行输出格式必须严格为：`[行号] 润色结果`
-  13. 必须使用半角方括号和阿拉伯数字行号，例如 `[37] 文本`
-  14. 禁止输出 JSON、代码块、解释、标题、前言、后记或任何额外文本。
+  5. 草译中相邻几行文字完全相同的是重复行，表示同一句中文跨这几行原文保持显示。润色后这几行仍输出完全相同的文本。
+  6. 不允许改变原文事实、立场、褒贬色彩，不允许过度引申或过度翻译。
+  7. 必须纠正草译中的误译、漏译、语义偏移和明显直译腔。允许整句重译，也允许原样保留。
+  8. 以【原文 + 全文上下文】为唯一判断依据，草译只是参考，不是修改的上限。
+  9. 专有名词（人名、地名、机构名、产品名等）译法必须全文统一。
+  10. 同一术语和同类表达必须全文用词统一。
+  11. 不要对{src_language}原文做任何改写或纠错；本任务只润色{TARGET_LANGUAGE}译文。
+  12. 输出必须严格按行号顺序连续给出，不能跳号。
+  13. 每一行输出格式必须严格为：`[行号] 润色结果`
+  14. 必须使用半角方括号和阿拉伯数字行号，例如 `[37] 文本`
+  15. 禁止输出 JSON、代码块、解释、标题、前言、后记或任何额外文本。
 
   ### Style and Quality Rules
   1. 允许按中文习惯调整语序（含倒装、局部换位、跨短句重组），但不得破坏行对齐约束。
@@ -402,7 +404,7 @@ def get_prompt_single_pass_full_polish(
    允许更换用词、调整语序、拆分或合并句子内的成分；只要不增减信息，改动力度不受“草译长什么样”限制。
 4. 对英文口语连接词（如 but/so）若仅为口头衔接，不要机械译成“但/所以/然而”。
 5. 可适度使用地道中文表达（含成语）增强本地化，但避免生硬堆砌。
-6. 字幕应尽量简洁，单行长度以“易读”为优先，理想约 15 字左右（软约束，不得因压缩而丢信息）。
+6. 尽量不要增加每行字幕的长度，除非确有必要；不得丢失信息。
 7. 标点规则：除问号、感叹号、引号外，其余标点尽量弱化处理（必要时用空格替代），保持画面阅读简洁。
 
 ### Important notice
