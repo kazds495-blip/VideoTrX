@@ -5,17 +5,20 @@ import math
 
 from videotrx import paths
 from videotrx.pipeline.meaning_split import split_sentence
-from videotrx.prompts import get_align_prompt, get_target_semantic_alignment_prompt
+from videotrx.prompts import get_align_prompt, get_compress_prompt, get_target_semantic_alignment_prompt
 from videotrx.pipeline.subtitle_render import filter_chinese_punctuation
 from rich.panel import Panel
 from rich.console import Console
 from rich.table import Table
 from videotrx import config
 from videotrx.llm import ask_json
-from videotrx.utils import append_jsonl, except_handler, read_json, write_json
+from videotrx.utils import except_handler, read_json, write_json
 console = Console()
 
 TARGET_ALIGNMENT_BATCH_SIZE = 5
+COMPRESS_BATCH_SIZE = 5
+# 只有中文超宽、且超出部分不超过当前宽度的这个比例时，先压缩再考虑拆分
+COMPRESS_MAX_OVER_RATIO = 0.20
 TARGET_BOUNDARY_PUNCTUATION = set("，。！？；：,.!?;:…")
 TARGET_BOUNDARY_CLOSERS = set("」』】）》〉〕”’)]}")
 TARGET_ALIGNMENT_SCHEMA = {
@@ -30,6 +33,26 @@ TARGET_ALIGNMENT_SCHEMA = {
                     "target_parts": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["id", "target_parts"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
+
+COMPRESS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "translation": {"type": "string"},
+                },
+                "required": ["id", "translation"],
                 "additionalProperties": False,
             },
         }
@@ -368,13 +391,11 @@ def align_subs(src_sub: str, tr_sub: str, src_part: str, target_max_length: int)
         "additionalProperties": False,
     }
 
-    # 超宽重译沿用全文润色的 LLM 设置
     parsed = ask_json(
         align_prompt,
         align_schema,
         valid_def=valid_align,
         log_title='align_subs',
-        section="polish",
     )
     align_data = parsed['align']
     tr_parts = [item[f'target_part_{i+1}'].strip() for i, item in enumerate(align_data)]
@@ -419,45 +440,52 @@ def _serialize_decision_parts(parts) -> str:
     return json.dumps(parts, ensure_ascii=False)
 
 
-def _append_target_rewrite_changelog(records):
-    """按原始行号汇总本轮采用的片段，沿用润色日志中的初译基线。"""
-    try:
-        rewritten_rows = {record["row"] for record in records if record["stage"] == "target_rewrite"}
-        if not rewritten_rows:
-            return
+def _validate_compress_response(response_data, expected_items):
+    if not isinstance(response_data, dict) or not isinstance(response_data.get("items"), list):
+        return False, "Missing required list: `items`", {}
 
-        with open(paths.POLISH_CHANGELOG, "r", encoding="utf-8") as f:
-            baseline = [json.loads(line) for line in f if line.strip()]
-        baseline_by_row = {
-            int(record["row"]): record
-            for record in baseline
-            if record["stage"] in {"polish", "polish_fallback"}
+    response_items = response_data["items"]
+    response_ids = [item.get("id") if isinstance(item, dict) else None for item in response_items]
+    expected_ids = [item["id"] for item in expected_items]
+    if response_ids != expected_ids:
+        return False, "Compress item order or ids mismatch", {}
+
+    translations_by_id = {}
+    for item in response_items:
+        translation = item.get("translation")
+        if not isinstance(translation, str) or not translation.strip():
+            return False, f"Compressed translation is empty or not a string for id {item['id']}", {}
+        translations_by_id[item["id"]] = translation.strip()
+
+    return True, "Compress completed", translations_by_id
+
+
+def compress_targets(batch_items, target_max_length):
+    """一批超宽中文请求压缩；返回 ({id: 压缩后中文}, 失败原因)。"""
+    def valid_compress(response_data):
+        valid, message, _ = _validate_compress_response(response_data, batch_items)
+        return {
+            "status": "success" if valid else "error",
+            "message": message,
         }
-        parts_by_row = {}
-        for record in records:
-            if record["row"] in rewritten_rows:
-                parts_by_row.setdefault(record["row"], []).extend(json.loads(record["target_parts"]))
 
-        updates = []
-        for row, parts in parts_by_row.items():
-            base = baseline_by_row[row]
-            final = "\n".join(parts)
-            updates.append({
-                "row": row,
-                "source": base["source"],
-                "draft": base["draft"],
-                "final": final,
-                "stage": "target_rewrite",
-                "changed": final != base["draft"],
-                "status": base["status"],
-                "note": "; ".join(filter(None, [
-                    base["note"],
-                    f"拆分第 {records[0]['attempt']} 轮，采用 {len(parts)} 个片段",
-                ])),
-            })
-        append_jsonl(paths.POLISH_CHANGELOG, updates)
+    try:
+        prompt = get_compress_prompt(batch_items, target_max_length)
+        response_data = ask_json(
+            prompt,
+            COMPRESS_SCHEMA,
+            valid_def=valid_compress,
+            log_title='compress_targets',
+        )
+        valid, message, translations_by_id = _validate_compress_response(
+            response_data,
+            batch_items,
+        )
+        if not valid:
+            return {}, message
+        return translations_by_id, ""
     except Exception as error:
-        console.print(f"[yellow]Warning: Failed to append target rewrite changelog: {error}[/yellow]")
+        return {}, f"{type(error).__name__}: {error}"
 
 
 def split_align_subs(
@@ -478,6 +506,7 @@ def split_align_subs(
 
     result_src_lines = list(src_lines)
     result_tr_lines = list(tr_lines)
+    to_compress = []
     to_split = []
     round_records = []
     for i, (src, tr) in enumerate(zip(src_lines, tr_lines)):
@@ -487,16 +516,19 @@ def split_align_subs(
         # 小数部分不计，25.x 视为 25
         tr_over = math.floor(target_length) > TARGET_MAX_LENGTH
         mode = "keep"
-        if src_over or tr_over:
-            # 翻译超长时继续使用原有的拆分与对齐流程。
+        if src_over:
+            # 英文超长时按原有逻辑拆分，不压缩
             mode = "split+align_translation" if tr_over else "split_source_only"
+        elif tr_over:
+            # 只有中文超宽：超出不多时先压缩，压不下去再拆
+            over_ratio = (target_length - TARGET_MAX_LENGTH) / target_length
+            mode = "compress" if over_ratio <= COMPRESS_MAX_OVER_RATIO else "split+align_translation"
 
         round_records.append(
             {
                 "attempt": attempt,
                 "line_index": i,
                 "row": original_row_ids[i],
-                "stage": "target_rewrite" if tr_over else "",
                 "source": src,
                 "target": tr,
                 "source_length": len(src),
@@ -509,12 +541,26 @@ def split_align_subs(
                 "target_boundary_candidates": _serialize_decision_parts([]),
                 "decision": "keep",
                 "fallback_reason": "",
+                "compressed_target": "",
+                "compressed_target_display_length": None,
                 "source_parts": _serialize_decision_parts([src]),
                 "target_parts": _serialize_decision_parts([tr]),
             }
         )
 
-        if src_over or tr_over:
+        if mode == "compress":
+            to_compress.append(
+                {
+                    "id": i,
+                    "source": src,
+                    "translation": tr,
+                    "width": target_length,
+                    "over_by": target_length - TARGET_MAX_LENGTH,
+                    "previous_translation": str(tr_lines[i - 1]) if i > 0 else "",
+                    "next_translation": str(tr_lines[i + 1]) if i + 1 < len(tr_lines) else "",
+                }
+            )
+        elif mode != "keep":
             to_split.append(
                 {
                     "index": i,
@@ -523,6 +569,7 @@ def split_align_subs(
                     "tr_over": tr_over,
                     "source": src,
                     "target": tr,
+                    "fallback_reason": "",
                 }
             )
             table = Table(title=f"📏 Line {i} needs to be split")
@@ -532,7 +579,49 @@ def split_align_subs(
             table.add_row("Target Line", tr)
             table.add_row("Trigger", f"src_over={src_over}, tr_over={tr_over}, mode={mode}")
             console.print(table)
-    
+
+    compress_batches = [
+        to_compress[start:start + COMPRESS_BATCH_SIZE]
+        for start in range(0, len(to_compress), COMPRESS_BATCH_SIZE)
+    ]
+    if compress_batches:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.get("max_workers")) as executor:
+            compress_results = list(executor.map(
+                lambda batch: compress_targets(batch, TARGET_MAX_LENGTH),
+                compress_batches,
+            ))
+
+        for batch_items, (translations_by_id, error_message) in zip(compress_batches, compress_results):
+            for item in batch_items:
+                i = item["id"]
+                record = round_records[i]
+                if error_message:
+                    fallback_reason = error_message
+                else:
+                    compressed = translations_by_id[i]
+                    compressed_length = target_display_length(compressed)
+                    record["compressed_target"] = compressed
+                    record["compressed_target_display_length"] = compressed_length
+                    if math.floor(compressed_length) <= TARGET_MAX_LENGTH:
+                        # 压缩后放得下，这一行保持一行
+                        result_tr_lines[i] = compressed
+                        record["decision"] = "compress"
+                        record["target_parts"] = _serialize_decision_parts([compressed])
+                        continue
+                    fallback_reason = f"compress still over: {compressed_length:.1f}"
+
+                to_split.append(
+                    {
+                        "index": i,
+                        "mode": "split+align_translation",
+                        "src_over": False,
+                        "tr_over": True,
+                        "source": item["source"],
+                        "target": item["translation"],
+                        "fallback_reason": fallback_reason,
+                    }
+                )
+
     @except_handler("Error in split_align_subs")
     def process(split_item):
         i = split_item["index"]
@@ -550,7 +639,7 @@ def split_align_subs(
                 "target_parts": tr_parts,
                 "target_boundary_candidates": [],
                 "decision": "split+align_translation",
-                "fallback_reason": "",
+                "fallback_reason": split_item["fallback_reason"],
             }
         elif mode == "split_source_only":
             src_parts = [part.strip() for part in split_src.split("\n") if str(part).strip()]
@@ -647,7 +736,6 @@ def split_align_subs(
 
     if decision_records is not None:
         decision_records.extend(round_records)
-    _append_target_rewrite_changelog(round_records)
 
     # 原始行号随片段展开，原地更新列表以保留现有二元返回接口。
     original_row_ids[:] = [

@@ -10,11 +10,6 @@ from rich.table import Table
 
 from videotrx import config, paths
 from videotrx.llm import ask_json
-from videotrx.pipeline.polish import (
-    _cleanup_single_pass_full_polish_progress,
-    _write_polish_changelog,
-    polish_single_pass_full_text,
-)
 from videotrx.pipeline.subtitle_render import get_sentence_timestamps
 from videotrx.pipeline.subtitle_split import target_display_length
 from videotrx.pipeline.terminology import search_things_to_note_in_prompt
@@ -246,21 +241,6 @@ def translate_all():
         
         trans_text.extend(results[i][2].split('\n'))
 
-    # add one full-text polish pass after chunk translation
-    console.print("[cyan]Running full-text polish...[/cyan]")
-    try:
-        trans_text = polish_single_pass_full_text(src_text, trans_text, theme_prompt)
-        console.print("[green]✅ Full-text polish completed.[/green]")
-    except Exception as e:
-        console.print(
-            "[yellow]Warning: Full-text polish failed; fallback to original single-pass result. "
-            f"Reason: {e}[/yellow]"
-        )
-        _write_polish_changelog(
-            src_text, trans_text, trans_text,
-            stage="polish_fallback", note=str(e),
-        )
-
     # 只校验每句原文都能与转写词对上，时间戳在生成字幕时再算
     words_df = pd.DataFrame(read_json(paths.TRANSCRIPT)["words"], columns=["text", "start", "end"])
     df_translate = pd.DataFrame({'source': src_text, 'translation': trans_text})
@@ -268,5 +248,4 @@ def translate_all():
     console.print(df_translate)
 
     write_json(paths.TRANSLATION, df_translate.to_dict("records"))
-    _cleanup_single_pass_full_polish_progress()
     console.print("[bold green]✅ Translation completed and results saved.[/bold green]")

@@ -699,3 +699,40 @@ Pre-processed {src_lang} Subtitles ([br] indicates split points): {src_part}
 Note: Start you answer with ```json and end with ```, do not add any other text.
 '''.strip()
     return align_prompt
+
+
+def get_compress_prompt(items, target_max_length):
+    items_json = json.dumps(
+        [
+            {**item, "width": round(item["width"], 1), "over_by": round(item["over_by"], 1)}
+            for item in items
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    return f'''
+## 角色
+你是中文字幕编辑，熟悉中英双语和中文日常表达习惯。
+
+## 任务
+下面每条中文字幕都超出了单行显示宽度。请在不损失原文含义的前提下，把每条改写得更简洁，使宽度不超过 {target_max_length}。
+
+宽度计算：汉字和全角符号各算 1，英文字母、数字、空格约算半个；中文标点显示时会换成空格。每条给出了当前宽度 `width` 和超出量 `over_by`。
+
+## 规则
+1. 以英文原文为准，保留原文的全部信息、事实、立场和语气。
+2. 英文中只起口头衔接作用的连接词（如 but、so），不必机械译成“但”“所以”。
+3. 可以换用更简短的说法、调整语序、去掉重复或可省略的虚词。
+4. 专有名词和术语沿用现有译文的译法。
+5. 禁止凭空增饰：不使用原文中不存在的成语、四字词语、网络梗或俗语；不创造比喻、夸张或情绪化渲染；原文直白，译文也直白。
+6. `previous_translation` 和 `next_translation` 是前后行的字幕，只用来理解上下文，不改动、不输出。
+7. 无法在不丢信息的前提下压到上限以内时，原样返回现有译文。
+
+## 待压缩字幕
+{items_json}
+
+## 输出
+仅输出一个可解析的 JSON 对象，不使用 Markdown 代码块，不添加解释或其他文字：
+{{"items": [{{"id": 条目 id, "translation": "压缩后的中文"}}]}}
+'''.strip()

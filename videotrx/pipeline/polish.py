@@ -8,7 +8,7 @@ from rich.console import Console
 
 from videotrx import llm, paths
 from videotrx.prompts import get_prompt_single_pass_full_polish
-from videotrx.utils import append_jsonl
+from videotrx.utils import append_jsonl, read_json, write_json
 
 console = Console()
 
@@ -704,3 +704,32 @@ def polish_single_pass_full_text(src_lines, draft_lines, summary_prompt=None):
 
     _write_polish_changelog(src_lines, draft_lines, polished_lines)
     return polished_lines
+
+
+def polish_main():
+    """按字幕行做全文润色；失败时退回草译。"""
+    rows = read_json(paths.SUBTITLE_LINES)
+    src_lines = [row["source"] for row in rows]
+    draft_lines = [row["translation"] for row in rows]
+    theme_prompt = read_json(paths.TERMINOLOGY).get("theme")
+
+    console.print("[cyan]Running full-text polish...[/cyan]")
+    try:
+        final_lines = polish_single_pass_full_text(src_lines, draft_lines, theme_prompt)
+        console.print("[green]✅ Full-text polish completed.[/green]")
+    except Exception as e:
+        console.print(
+            "[yellow]Warning: Full-text polish failed; fallback to subtitle lines before polish. "
+            f"Reason: {e}[/yellow]"
+        )
+        final_lines = draft_lines
+        _write_polish_changelog(
+            src_lines, draft_lines, draft_lines,
+            stage="polish_fallback", note=str(e),
+        )
+
+    write_json(
+        paths.POLISHED_LINES,
+        [{"source": s, "translation": tr} for s, tr in zip(src_lines, final_lines)],
+    )
+    _cleanup_single_pass_full_polish_progress()

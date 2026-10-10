@@ -272,7 +272,7 @@ def clean_translation(x):
 
 def align_timestamp_main():
     df_text = pd.DataFrame(read_json(paths.TRANSCRIPT)["words"], columns=["text", "start", "end"])
-    df_translate = pd.DataFrame(read_json(paths.SUBTITLE_LINES), columns=["source", "translation"])
+    df_translate = pd.DataFrame(read_json(paths.POLISHED_LINES), columns=["source", "translation"])
     df_translate['translation'] = df_translate['translation'].apply(clean_translation)
     
     df_trans_time = align_timestamp(df_text, df_translate)

@@ -19,7 +19,7 @@ api:
   # 思考等级：留空不传；写什么就原样传什么（如 low / medium / high）
   reasoning_effort: ''
 
-# 全文润色与超长字幕重译使用的 LLM
+# 全文润色使用的 LLM
 # 留空的项继承 api；reasoning_effort 只看本块，不继承
 # english_correction、entity_repair 也可以加同样的 api 子块单独配置
 polish:

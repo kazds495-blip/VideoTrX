@@ -11,10 +11,11 @@
 3. **英文校正**：LLM 只替换明显的拼写或识别错误（含人名、品牌、产品名），不增删词。
 4. **断句**：spaCy 按标点和停顿断句，修复被切开的专有名词；超长句再由 LLM 按语义拆分。
 5. **摘要与术语**：LLM 概括主题并提取术语表，可叠加自定义术语。
-6. **翻译与全文润色**：分块逐行翻译，再对全文做一次统一润色。
-7. **字幕切分**：按英文字符数和中文显示宽度，把超长的字幕拆成多条。
-8. **生成字幕**：输出双语 ASS 字幕 `output/src_trans.ass`。
-9. **按需烧录**：把字幕烧进视频，自动选择可用的编码器，优先硬件编码。
+6. **翻译**：分块逐行初译。
+7. **字幕切分**：按英文字符数和中文显示宽度，把超长的字幕拆成多条；中文超宽时先压缩，压不下去再拆。
+8. **全文润色**：按字幕行对全文做一次统一润色。
+9. **生成字幕**：输出双语 ASS 字幕 `output/src_trans.ass`。
+10. **按需烧录**：把字幕烧进视频，自动选择可用的编码器，优先硬件编码。
 
 ## 支持平台
 
@@ -90,7 +91,7 @@ sudo apt install libxcb-cursor0
 | `api.request_retries` | `5` | 请求失败后的重试次数 |
 | `api.request_retry_delay_sec` | `1` | 重试间隔（秒） |
 | `api.reasoning_effort` | 空 | 思考等级。留空不传；写什么就原样传什么，如 `low` / `medium` / `high` |
-| `polish.api.*` | | 全文润色和超长字幕重译使用的 LLM，各项含义同 `api.*`。留空的项继承 `api`；`reasoning_effort` 只看本块，不继承 |
+| `polish.api.*` | | 全文润色使用的 LLM，各项含义同 `api.*`。留空的项继承 `api`；`reasoning_effort` 只看本块，不继承 |
 | `mai.key` | | MAI-Transcribe-2 的 key |
 | `mai.endpoint` | | MAI 所在的 Azure 资源地址，形如 `https://<资源名>.services.ai.azure.com` |
 | `mai.model` | `MAI-Transcribe-2` | 转写模型 |
@@ -168,7 +169,7 @@ download:
 
 字幕流程的每个阶段完成后都会写出一个文件。「继续任务」从最后一个已存在的输出之后接着运行，不会重复已完成的阶段。
 
-想从某个阶段重新运行，就删掉该阶段及其后各阶段的输出文件，再点「继续任务」。例如删掉 `translation.json`、`subtitle_lines.json` 和 `output/src_trans.ass`，就会从「翻译与润色」重跑。
+想从某个阶段重新运行，就删掉该阶段及其后各阶段的输出文件，再点「继续任务」。例如删掉 `translation.json`、`subtitle_lines.json`、`polished_lines.json` 和 `output/src_trans.ass`，就会从「翻译」重跑。
 
 | 阶段 | 输出文件 |
 |---|---|
@@ -177,8 +178,9 @@ download:
 | NLP 断句 | `output/log/split_by_nlp.json` |
 | 语义断句 | `output/log/split_by_meaning.json` |
 | 摘要与术语 | `output/log/terminology.json` |
-| 翻译与润色 | `output/log/translation.json` |
+| 翻译 | `output/log/translation.json` |
 | 字幕切分 | `output/log/subtitle_lines.json` |
+| 全文润色 | `output/log/polished_lines.json` |
 | 生成字幕 | `output/src_trans.ass` |
 
 转写需要音频：从「开始」进入时使用刚下载的音频；从「继续任务」进入时使用 `output/` 中最新的 `*_audio.*` 文件。
@@ -196,11 +198,12 @@ download:
 | `entity_repair_changelog.jsonl` | 实体修复的逐条记录 |
 | `split_by_meaning.json` | 语义断句结果 |
 | `terminology.json` | 主题摘要和术语表 |
-| `translation.json` | 逐句原文与润色后的译文 |
-| `polish_changelog.jsonl` | 全文润色和超长字幕重译的逐行记录 |
-| `polish_progress.json`、`polish_progress.txt`、`polish_stream.txt` | 全文润色的断点续传进度、预览和流式快照，翻译完成后删除 |
+| `translation.json` | 逐句原文与初译 |
 | `subtitle_lines.json` | 切分后的字幕行 |
-| `subtitle_split_decisions.json` | 字幕切分的决策记录 |
+| `subtitle_split_decisions.json` | 字幕切分的决策记录，包含压缩和拆分的记录 |
+| `polish_changelog.jsonl` | 全文润色的逐行记录 |
+| `polish_progress.json`、`polish_progress.txt`、`polish_stream.txt` | 全文润色的断点续传进度、预览和流式快照，润色完成后删除 |
+| `polished_lines.json` | 润色后的最终字幕行 |
 
 `output/gpt_log/` 中保存每次 LLM 请求的提示词和回复。除全文润色外，提示词和模型都相同的请求会直接复用已保存的回复，不再重复调用。
 

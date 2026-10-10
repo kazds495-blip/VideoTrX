@@ -25,6 +25,7 @@ POLISH_PREVIEW = LOG_DIR / "polish_progress.txt"
 POLISH_STREAM = LOG_DIR / "polish_stream.txt"
 SUBTITLE_LINES = LOG_DIR / "subtitle_lines.json"
 SUBTITLE_SPLIT_DECISIONS = LOG_DIR / "subtitle_split_decisions.json"
+POLISHED_LINES = LOG_DIR / "polished_lines.json"
 FINAL_ASS = OUTPUT_DIR / "src_trans.ass"
 
 

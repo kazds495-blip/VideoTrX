@@ -19,9 +19,10 @@ STAGES = (
     ("english_correction", paths.ENGLISH_CORRECTION_DONE, "英文校正", 10),
     ("nlp_split", paths.NLP_SPLIT, "NLP 断句", 25),
     ("meaning_split", paths.MEANING_SPLIT, "语义断句", 40),
-    ("terminology", paths.TERMINOLOGY, "摘要与术语", 55),
-    ("translate", paths.TRANSLATION, "翻译与润色", 70),
-    ("subtitle_split", paths.SUBTITLE_LINES, "字幕切分", 85),
+    ("terminology", paths.TERMINOLOGY, "摘要与术语", 50),
+    ("translate", paths.TRANSLATION, "翻译", 60),
+    ("subtitle_split", paths.SUBTITLE_LINES, "字幕切分", 70),
+    ("polish", paths.POLISHED_LINES, "全文润色", 80),
     ("render", paths.FINAL_ASS, "生成字幕", 95),
 )
 
@@ -33,6 +34,7 @@ ENTRY_POINTS = {
     "terminology": ("terminology", "get_summary"),
     "translate": ("translate", "translate_all"),
     "subtitle_split": ("subtitle_split", "split_for_sub_main"),
+    "polish": ("polish", "polish_main"),
     "render": ("subtitle_render", "align_timestamp_main"),
 }
 
