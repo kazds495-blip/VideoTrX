@@ -6,6 +6,6 @@ spacy==3.7.4
 autocorrect-py
 openai==2.54.0
 json-repair
-requests==2.32.3
+requests
 rich
 PyYAML==6.0.2

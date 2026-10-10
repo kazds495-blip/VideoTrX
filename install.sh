@@ -76,8 +76,7 @@ fi
 echo "==> 安装 Python 依赖"
 "$UV" pip install --python .venv -r requirements.txt || fail "安装 Python 依赖失败"
 echo "==> 升级 yt-dlp"
-"$UV" pip install --python .venv --upgrade-package yt-dlp --upgrade-package yt-dlp-ejs "yt-dlp[default]" \
-    || fail "升级 yt-dlp 失败"
+"$UV" pip install --python .venv -U "yt-dlp[default]" || fail "升级 yt-dlp 失败"
 echo "==> 安装 spaCy 英文模型"
 "$UV" pip install --python .venv "$SPACY_MODEL" || fail "安装 spaCy 英文模型失败"
 
