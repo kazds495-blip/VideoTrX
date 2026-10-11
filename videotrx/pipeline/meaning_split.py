@@ -62,7 +62,7 @@ def split_sentence(sentence, min_parts, max_parts=None, char_limit=100, index=-1
             return {"status": "error", "message": "Split contains an empty part"}
 
         original_text = " ".join(str(sentence).split())
-        returned_text = " ".join("".join(parts).split())
+        returned_text = " ".join(get_joiner(source_language()).join(parts).split())
         if returned_text != original_text:
             matcher = SequenceMatcher(None, original_text, returned_text)
             changed_characters = sum(
